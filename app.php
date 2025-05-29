@@ -14,13 +14,34 @@ function env($name, $default = null): ?string {
 
 // Delete an entire directory and its contents, recursively
 function deleteTree($dir): bool {
-    $files = array_diff(scandir($dir), array('.','..'));
+    if (!file_exists($dir)) return true;
 
-    foreach ($files as $file) {
-      (is_dir("$dir/$file")) ? deleteTree("$dir/$file") : unlink("$dir/$file");
+    // Remove read-only and hidden attributes on Windows
+    if (strtoupper(substr(PHP_OS, 0, 3)) === 'WIN') {
+        @shell_exec('attrib -R -H "' . $dir . '" /S /D');
     }
 
-    return rmdir($dir);
+    if (is_file($dir) || is_link($dir)) {
+        return @unlink($dir);
+    }
+
+    $files = array_diff(scandir($dir), array('.', '..'));
+
+    foreach ($files as $file) {
+        $path = $dir . DIRECTORY_SEPARATOR . $file;
+
+        // remove read-only and hidden attributes on Windows
+        if (strtoupper(substr(PHP_OS, 0, 3)) === 'WIN') {
+            @shell_exec('attrib -R -H "' . $path . '" /S /D');
+        }
+        if (is_dir($path)) {
+            deleteTree($path);
+        } else {
+            @unlink($path);
+        }
+    }
+
+    return @rmdir($dir);
 }
 
 // Log function for debugging
@@ -74,13 +95,13 @@ function processIssue($payload) {
     
     $branchName = 'fix-for-issue-' . $issueNumber;
     
-    $repoPath = cloneRepository($repoOwner, $repoName, env('GITHUB_TOKEN'), env('TEMP_DIR'));
+    $repoPath = cloneRepository($repoOwner, $repoName, env('GITHUB_TOKEN'), env('TEMP_DIR'), env('OS_TYPE'));
     
     createBranch($repoPath, $branchName);
     
     $codeContext = scanCodebase($repoPath);
 
-    $llmResponse = sendToLLM($codeContext, $issueTitle, $issueBody, env('OPENAI_API_KEY'), env('OPENAI_MODEL'));
+    $llmResponse = sendToLLM($codeContext, $issueTitle, $issueBody, env('OPENAI_API_KEY'), env('OPENAI_MODEL'), env('LLM_PROVIDER'));
     
     applyChanges($repoPath, $llmResponse['changes']);
     
@@ -94,19 +115,38 @@ function processIssue($payload) {
 }
 
 // Clone the repository to a temporary directory
-function cloneRepository($owner, $repo, $token, $tempDir): string {
+function cloneRepository($owner, $repo, $token, $tempDir, $os): string {
     
-    $repoPath = $tempDir . '/' . $owner . '/' . $repo;
+    $sep = ($os === 'windows') ? '\\' : '/';
+    $tempDir = rtrim($tempDir, '/\\');
+    $repoPath = $tempDir . $sep . $owner . $sep . $repo;
 
     if (file_exists($repoPath)) {
         deleteTree($repoPath);
+        // Wait for the directory to be fully deleted
+        $wait = 0;
+        while (file_exists($repoPath) && $wait < 10) {
+            usleep(100000); // 0.1 seconds
+            $wait++;
+        }
+        if (file_exists($repoPath)) {
+            throw new Exception("Failed to delete existing repository directory {$repoPath}");
+        }
     }
-    
-    mkdir($repoPath, 0777, true);
     
     $cloneUrl = "https://{$token}@github.com/{$owner}/{$repo}.git";
     
-    $command = "git clone {$cloneUrl} {$repoPath} 2>&1";
+    $parentDir = dirname($repoPath);
+    if (!file_exists($parentDir)) {
+        mkdir($parentDir, 0777, true);
+    }
+    
+    if ($os === 'windows') {
+        $command = "git clone {$cloneUrl} \"{$repoPath}\" 2>&1";
+    } else {
+        $command = "git clone {$cloneUrl} {$repoPath} 2>&1";
+    }
+    
     exec($command, $output, $returnCode);
     
     if ($returnCode !== 0) {
@@ -203,11 +243,12 @@ function scanCodebase($repoPath): string|bool {
 }
 
 // Send the context and issue to the LLM
-function sendToLLM($codeContext, $issueTitle, $issueBody, $apiKey, $model) {
+function sendToLLM($codeContext, $issueTitle, $issueBody, $apiKey, $model, $provider)
+{
 
     $prompt = createLLMPrompt($codeContext, $issueTitle, $issueBody);
     
-    return getJSONFromAIProvider($prompt, $apiKey, $model);
+    return getJSONFromAIProvider($prompt, $apiKey, $model, $provider);
 }
 
 // Create a prompt for the LLM
@@ -432,7 +473,15 @@ function pushBranch($repoPath, $branchName, $token) {
 
     chdir($repoPath);
     
-    $command = "git push https://{$token}@github.com/$(git config --get remote.origin.url | sed 's/https:\/\/.*@github.com\///') {$branchName} 2>&1";
+    $remoteUrl = trim(shell_exec('git config --get remote.origin.url'));
+    
+    $remoteUrl = preg_replace(
+        '#https://([^@]+@)?github.com/#',
+        "https://{$token}@github.com/",
+        $remoteUrl
+    );
+    
+    $command = "git push \"{$remoteUrl}\" {$branchName} 2>&1";
     
     exec($command, $output, $returnCode);
     
