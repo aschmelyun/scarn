@@ -1,6 +1,6 @@
 # Agent Scarn
 
-A proof-of-concept "asynchronous coding agent" built as a single PHP script.
+A proof-of-concept "asynchronous coding agent" built as a single PHP script. [See video](https://www.youtube.com/watch?v=rSfIOyQASC4)
 
 This was created as a fun experiment to see if I could make something like Devin, Jules, or Copilot Agent. Obviously it's much worse so I wouldn't recommend using this in practice, but it _does_ function as intended most of the time!
 
